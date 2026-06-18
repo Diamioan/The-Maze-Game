@@ -5,6 +5,30 @@ document.getElementById('regenerateMaze').addEventListener('click', () => {
 
 document.getElementById('lifetimeScore').innerText = localStorage.getItem('lifetimeScore') ? `Lifetime Score: ${localStorage.getItem('lifetimeScore')}` : 'Lifetime Score: 0';
 
+// --- Daily Challenge ---
+const todayStr = new Date().toISOString().slice(0, 10);
+const dayNumber = Math.floor((Date.now() - new Date('2024-01-01').getTime()) / 86400000) + 1;
+const isDailyMode = new URLSearchParams(location.search).has('daily');
+const dailyKey = `dailyMaze_${todayStr}`;
+
+function seededRng(seed) {
+    let s = seed | 0;
+    return () => {
+        s = (s + 0x6D2B79F5) | 0;
+        let t = Math.imul(s ^ (s >>> 15), 1 | s);
+        t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+}
+
+function hashStr(str) {
+    let h = 0;
+    for (let i = 0; i < str.length; i++) h = (Math.imul(31, h) + str.charCodeAt(i)) | 0;
+    return h;
+}
+
+const rng = isDailyMode ? seededRng(hashStr(todayStr)) : () => Math.random();
+
 const canvas = document.getElementById('mazeCanvas');
 const ctx = canvas.getContext('2d');
 
@@ -45,7 +69,7 @@ function carvePassagesFrom(x, y) {
         [0, -1]
     ];
 
-    directions.sort(() => Math.random() - 0.5);
+    directions.sort(() => rng() - 0.5);
 
     for (const [dx, dy] of directions) {
         const nx = x + dx * 2;
@@ -86,22 +110,120 @@ function checkCollision(x, y) {
     return maze[y][x] === 1;
 }
 
-function movePlayer(dx, dy) {
+// --- Timer: starts on the first move ---
+let startTime = null;
+let timerStarted = false;
+let timerRaf = null;
+let gameWon = false;
+const timerEl = document.getElementById('timer');
+
+// --- Move counter ---
+let moveCount = 0;
+const moveCounterEl = document.getElementById('moveCounter');
+
+function formatTime(ms) {
+    return (ms / 1000).toFixed(1) + 's';
+}
+
+// Daily mode init
+if (isDailyMode) {
+    document.getElementById('dailyBadge').textContent = `Daily Maze #${dayNumber}`;
+    document.getElementById('dailyBadge').style.display = 'block';
+    document.getElementById('regenerateMaze').style.display = 'none';
+    const prev = localStorage.getItem(dailyKey);
+    if (prev) {
+        const { time, moves } = JSON.parse(prev);
+        gameWon = true;
+        document.getElementById('winMessage').innerText =
+            `Already solved today! Lifetime score: ${localStorage.getItem('lifetimeScore') || 0}`;
+        document.getElementById('winTime').innerText = 'Your time: ' + formatTime(time);
+        document.getElementById('winMoves').innerText = 'Moves: ' + moves;
+        document.getElementById('shareResult').style.display = 'inline-block';
+        document.getElementById('winModal').classList.add('show');
+    }
+}
+
+function startTimer() {
+    if (timerStarted) return;
+    timerStarted = true;
+    startTime = performance.now();
+    function tick() {
+        timerEl.textContent = 'Time: ' + formatTime(performance.now() - startTime);
+        timerRaf = requestAnimationFrame(tick);
+    }
+    tick();
+}
+
+// --- Sliding movement: one press glides until a wall (or the exit) ---
+const slideState = { intervalId: null, direction: null };
+const SLIDE_MS = 35; // smaller = faster slide
+
+function stopSliding() {
+    if (slideState.intervalId) {
+        clearInterval(slideState.intervalId);
+        slideState.intervalId = null;
+    }
+    slideState.direction = null;
+}
+
+function step(dx, dy) {
     const newX = player.x + dx;
     const newY = player.y + dy;
     if (newX >= 0 && newX < cols && newY >= 0 && newY < rows && !checkCollision(newX, newY)) {
         player.x = newX;
         player.y = newY;
+        moveCount++;
+        moveCounterEl.textContent = 'Moves: ' + moveCount;
+        return true;
     }
+    return false;
+}
+
+function slide(dx, dy) {
+    if (gameWon) return;
+    if (slideState.direction && slideState.direction.dx === dx && slideState.direction.dy === dy) return;
+    if (slideState.direction && slideState.direction.dx === -dx && slideState.direction.dy === -dy) {
+        stopSliding();
+        return;
+    }
+    startTimer();
+    stopSliding();
+    // Move at least one cell immediately, then keep gliding.
+    if (!step(dx, dy)) return;
+    if (checkWin()) return;
+    slideState.direction = { dx, dy };
+    slideState.intervalId = setInterval(() => {
+        if (!step(dx, dy) || checkWin()) {
+            stopSliding();
+        }
+    }, SLIDE_MS);
 }
 
 function checkWin() {
     if (player.x === exit.x && player.y === exit.y) {
-        localStorage.getItem('lifetimeScore') ? localStorage.setItem('lifetimeScore', parseInt(localStorage.getItem('lifetimeScore')) + 1) : localStorage.setItem('lifetimeScore', 1);
-        alert("Congratulations, you've escaped the maze! Now we dare you to do it again! FYI, your lifetime score is currently: " + localStorage.getItem('lifetimeScore'));
-        window.location.reload();
+        gameWon = true;
+        stopSliding();
+        cancelAnimationFrame(timerRaf);
+        const elapsed = startTime ? performance.now() - startTime : 0;
+
+        const currentScore = parseInt(localStorage.getItem('lifetimeScore'), 10) || 0;
+        localStorage.setItem('lifetimeScore', currentScore + 1);
+
+        document.getElementById('winMessage').innerText =
+            "You escaped the maze! Lifetime score: " + localStorage.getItem('lifetimeScore');
+        document.getElementById('winTime').innerText = 'Your time: ' + formatTime(elapsed);
+        document.getElementById('winMoves').innerText = 'Moves: ' + moveCount;
+        if (isDailyMode) {
+            localStorage.setItem(dailyKey, JSON.stringify({ time: elapsed, moves: moveCount }));
+            document.getElementById('shareResult').style.display = 'inline-block';
+        }
+        document.getElementById('winModal').classList.add('show');
+        return true;
     }
+    return false;
 }
+
+document.getElementById('playAgain').addEventListener('click', () => window.location.reload());
 
 function draw() {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -116,26 +238,65 @@ draw();
 window.addEventListener('keydown', (e) => {
     switch(e.key) {
         case 'ArrowUp':
-            movePlayer(0, -1);
+            slide(0, -1);
             e.preventDefault();
             break;
         case 'ArrowDown':
-            movePlayer(0, 1);
+            slide(0, 1);
             e.preventDefault();
             break;
         case 'ArrowLeft':
-            movePlayer(-1, 0);
+            slide(-1, 0);
             e.preventDefault();
             break;
         case 'ArrowRight':
-            movePlayer(1, 0);
+            slide(1, 0);
             e.preventDefault();
             break;
     }
-    checkWin();
 });
 
-document.getElementById('moveUp').addEventListener('click', () => movePlayer(0, -1));
-document.getElementById('moveDown').addEventListener('click', () => movePlayer(0, 1));
-document.getElementById('moveLeft').addEventListener('click', () => movePlayer(-1, 0));
-document.getElementById('moveRight').addEventListener('click', () => movePlayer(1, 0));
+document.getElementById('moveUp').addEventListener('click', () => slide(0, -1));
+document.getElementById('moveDown').addEventListener('click', () => slide(0, 1));
+document.getElementById('moveLeft').addEventListener('click', () => slide(-1, 0));
+document.getElementById('moveRight').addEventListener('click', () => slide(1, 0));
+
+document.getElementById('dailyChallenge').addEventListener('click', () => {
+    location.href = location.pathname + '?daily';
+});
+
+document.getElementById('shareResult').addEventListener('click', () => {
+    const prev = localStorage.getItem(dailyKey);
+    if (!prev) return;
+    const { time, moves } = JSON.parse(prev);
+    const date = new Date(todayStr).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+    const text = `🌀 Daily Maze #${dayNumber} — ${date}\n⏱ ${formatTime(time)} · 👣 ${moves} moves\nPlay at → https://hoangsonww.github.io/The-Maze-Game/?daily`;
+    navigator.clipboard.writeText(text).then(() => {
+        const btn = document.getElementById('shareResult');
+        btn.textContent = 'Copied!';
+        setTimeout(() => { btn.textContent = 'Share Result'; }, 2000);
+    });
+});
+
+// --- Touch / swipe support ---
+let touchStart = null;
+const SWIPE_THRESHOLD = 30;
+
+window.addEventListener('touchstart', (e) => {
+    const t = e.touches[0];
+    touchStart = { x: t.clientX, y: t.clientY };
+}, { passive: true });
+
+window.addEventListener('touchend', (e) => {
+    if (!touchStart) return;
+    const t = e.changedTouches[0];
+    const dx = t.clientX - touchStart.x;
+    const dy = t.clientY - touchStart.y;
+    touchStart = null;
+    if (Math.abs(dx) < SWIPE_THRESHOLD && Math.abs(dy) < SWIPE_THRESHOLD) return;
+    if (Math.abs(dx) >= Math.abs(dy)) {
+        slide(dx > 0 ? 1 : -1, 0);
+    } else {
+        slide(0, dy > 0 ? 1 : -1);
+    }
+}, { passive: true });
